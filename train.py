@@ -14,33 +14,34 @@ import time
 from tensorflow.python import keras as keras
 from tensorflow.python.keras.callbacks import LearningRateScheduler
 
+
 LOG_DIR = 'logs'
-SHUFFLE_BUFFER = 10
+SHUFFLE_BUFFER = 4
 BATCH_SIZE = 256
-NUM_CLASSES = 50
+NUM_CLASSES = 6
 PARALLEL_CALLS=4
 RESIZE_TO = 224
-TRAINSET_SIZE = 5216
-VALSET_SIZE=624
+TRAINSET_SIZE = 14034
+VALSET_SIZE = 3000
 
 
 def parse_proto_example(proto):
     keys_to_features = {
-        'image/encoded': tf.FixedLenFeature((), tf.string, default_value=''),
-        'image/class/label': tf.FixedLenFeature([], tf.int64, default_value=tf.zeros([], dtype=tf.int64))
+        'image/encoded': tf.io.FixedLenFeature((), tf.string, default_value=''),
+        'image/class/label': tf.io.FixedLenFeature([], tf.int64, default_value=tf.zeros([], dtype=tf.int64))
     }
-    example = tf.parse_single_example(proto, keys_to_features)
+    example = tf.io.parse_single_example(proto, keys_to_features)
     example['image'] = tf.image.decode_jpeg(example['image/encoded'], channels=3)
     example['image'] = tf.image.convert_image_dtype(example['image'], dtype=tf.float32)
-    example['image'] = tf.image.resize_images(example['image'], tf.constant([RESIZE_TO, RESIZE_TO]))
-    return example['image'], example['image/class/label']
+    example['image'] = tf.image.resize(example['image'], tf.constant([RESIZE_TO, RESIZE_TO]))
+    return example['image'], tf.one_hot(example['image/class/label'], depth=NUM_CLASSES)
 
 
 def normalize(image, label):
     return tf.image.per_image_standardization(image), label
 
 def resize(image, label):
-    return tf.image.resize_images(image, tf.constant([RESIZE_TO, RESIZE_TO])), label
+    return tf.image.resize(image, tf.constant([RESIZE_TO, RESIZE_TO])), label
 
 def create_dataset(filenames, batch_size):
     """Create dataset from tfrecords file
@@ -51,38 +52,8 @@ def create_dataset(filenames, batch_size):
         .map(parse_proto_example)\
         .map(resize)\
         .map(normalize)\
-        .shuffle(buffer_size=5 * batch_size)\
-        .repeat()\
         .batch(batch_size)\
-        .prefetch(2 * batch_size)
-
-
-class Validation(tf.keras.callbacks.Callback):
-    def __init__(self, log_dir, validation_files, batch_size):
-        self.log_dir = log_dir
-        self.validation_files = validation_files
-        self.batch_size = batch_size
-
-    def on_epoch_end(self, epoch, logs=None):
-        print('The average loss for epoch {} is {:7.2f} '.format(
-            epoch, logs['loss']
-        ))
-
-        validation_dataset = create_dataset(self.validation_files, self.batch_size)
-        validation_images, validation_labels = validation_dataset.make_one_shot_iterator().get_next()
-        validation_labels = tf.one_hot(validation_labels, NUM_CLASSES)
-
-        result = self.model.evaluate(
-            validation_images,
-            validation_labels,
-            steps=int(np.ceil(VALSET_SIZE / float(BATCH_SIZE)))
-        )
-        callback = tf.keras.callbacks.TensorBoard(log_dir=self.log_dir, update_freq='epoch', batch_size=self.batch_size)
-
-        callback.set_model(self.model)
-        callback.on_epoch_end(epoch, {
-            'val_' + self.model.metrics_names[i]: v for i, v in enumerate(result)
-        })
+        .prefetch(batch_size)
 
 
 def build_model():
@@ -104,26 +75,23 @@ def main():
     args = args.parse_args()
 
     train_dataset = create_dataset(glob.glob(args.train), BATCH_SIZE)
-    train_images, train_labels = train_dataset.make_one_shot_iterator().get_next()
-    train_labels = tf.one_hot(train_labels, NUM_CLASSES)
+    validation_dataset = create_dataset(glob.glob(args.test), BATCH_SIZE)
 
     model = build_model()
 
     model.compile(
-        optimizer=keras.optimizers.sgd(lr=0.0001, momentum=0.9),
+        optimizer=tf.optimizers.SGD(lr=0.000001, momentum=0.9),
         loss=tf.keras.losses.categorical_crossentropy,
         metrics=[tf.keras.metrics.categorical_accuracy],
-        target_tensors=[train_labels]
     )
 
-    log_dir='{}/xray-{}'.format(LOG_DIR, time.time())
+    log_dir='{}/ilcd-{}'.format(LOG_DIR, time.time())
     model.fit(
-        (train_images, train_labels),
+        train_dataset,
         epochs=200,
-        steps_per_epoch=int(np.ceil(TRAINSET_SIZE / float(BATCH_SIZE))),
+        validation_data=validation_dataset,
         callbacks=[
             tf.keras.callbacks.TensorBoard(log_dir),
-            Validation(log_dir, validation_files=glob.glob(args.test), batch_size=BATCH_SIZE)
         ]
     )
 
